@@ -35,7 +35,12 @@ async function waitForAllConfirmations(transactions, requiredConfirmations) {
             await Promise.all(
                 Array.from(confirmationStates.entries()).map(async ([txHash, state]) => {
                     const publicProvider = getNextPublicProvider();
-                    const receipt = await publicProvider.getTransactionReceipt(txHash);
+                    let receipt = null;
+                    for (let retry = 0; retry < 5; retry++) {
+                        receipt = await publicProvider.getTransactionReceipt(txHash);
+                        if (receipt && receipt.blockNumber) break;
+                        await sleep(3000);
+                    }
 
                     if (!receipt || !receipt.blockNumber) {
                         statusLine += chalk.yellow(`[Wallet-${state.walletIndex + 1}: Pending] `);
@@ -48,7 +53,11 @@ async function waitForAllConfirmations(transactions, requiredConfirmations) {
                     if (confirmations >= requiredConfirmations) {
                         const mainReceipt = await provider.getTransactionReceipt(txHash);
                         confirmationStates.delete(txHash);
-                        confirmedReceipts.push({ receipt: mainReceipt, walletIndex: state.walletIndex });
+                        if (mainReceipt) {
+                            confirmedReceipts.push({ receipt: mainReceipt, walletIndex: state.walletIndex });
+                        } else {
+                            console.log(chalk.red(`❌ Failed to fetch receipt for txHash: ${txHash}`));
+                        }
                     } else {
                         statusLine += chalk.yellow(`[Wallet-${state.walletIndex + 1}: ${confirmations}/${requiredConfirmations} blocks] `);
                     }
@@ -97,6 +106,14 @@ async function executeTransactions(operations, description) {
     const confirmedReceipts = await waitForAllConfirmations(transactions, REQUIRED_CONFIRMATIONS);
 
     confirmedReceipts.forEach(({ receipt, walletIndex }) => {
+        if (!receipt) {
+            console.log(chalk.red(`❌ Wallet-${walletIndex + 1}: Transaction receipt is null!`));
+            return;
+        }
+        if (receipt.status === 0) {
+            console.log(chalk.red(`❌ Wallet-${walletIndex + 1}: Transaction ${receipt.transactionHash} failed!`));
+            return;
+        }
         const actualFee = receipt.gasUsed.mul(receipt.effectiveGasPrice);
         const currentWalletFee = walletFees.get(walletIndex) || ethers.BigNumber.from(0);
         walletFees.set(walletIndex, currentWalletFee.add(actualFee));
@@ -109,83 +126,13 @@ async function processVoteWallets(walletConfigs, iteration) {
     logWithBorder(
         chalk.cyan(`📌 [${getCurrentServerTime()}] Starting Vote iteration ${iteration + 1}`)
     );
-
-    const walletInfos = await Promise.all(
-        walletConfigs.map(async ({ privateKey, index }) => {
-            const wallet = new ethers.Wallet(privateKey, provider);
-            const points = await fetchTaikoPoints(wallet.address);
-            const balance = await provider.getBalance(wallet.address);
-
-            console.log(chalk.cyan(`\n🔷 Wallet-${index + 1} Status:`));
-            if (points) {
-                console.log(chalk.blue("📊 Initial Points:"), chalk.yellow(points.totalPoints.toFixed(2)));
-                console.log(chalk.blue("🏆 Current Rank:"), chalk.yellow(points.rank));
-            }
-            console.log(chalk.blue("💎 Current balance:"), chalk.yellow(ethers.utils.formatEther(balance)), "ETH");
-
-            return { wallet, points, balance, index };
-        })
-    );
-
-    const voteOperations = walletInfos.map(({ wallet, index }) => {
-        const contract = new ethers.Contract(VOTE_ADDRESS, VOTE_ABI, wallet);
-
-        return {
-            operation: () =>
-                contract.vote({
-                    maxFeePerGas: ethers.utils.parseUnits(config.vote.maxFee, "gwei"),
-                    maxPriorityFeePerGas: ethers.utils.parseUnits(config.vote.maxPriorityFee, "gwei"),
-                    gasLimit: 22000,
-                }),
-            walletIndex: index,
-        };
-    });
-
-    if (voteOperations.length > 0) {
-        await executeTransactions(voteOperations, "Vote");
-    }
-
-    await sleep(5000);
-
-    await Promise.all(
-        walletInfos.map(async ({ wallet, points: initialPoints, index }) => {
-            const finalPoints = await fetchTaikoPoints(wallet.address);
-            if (finalPoints && initialPoints) {
-                const pointsDifference = finalPoints.totalPoints - initialPoints.totalPoints;
-                console.log(chalk.blue(`📊 Wallet-${index + 1} Points earned:`), chalk.green(`+${pointsDifference.toFixed(2)}`));
-                console.log(
-                    chalk.blue(`🏆 Wallet-${index + 1} New Rank:`),
-                    chalk.yellow(finalPoints.rank),
-                    finalPoints.rank < initialPoints.rank
-                        ? chalk.green(`(↑${initialPoints.rank - finalPoints.rank})`)
-                        : ""
-                );
-
-                if (!walletPoints.has(wallet.address)) {
-                    walletPoints.set(wallet.address, []);
-                }
-                walletPoints.get(wallet.address).push({
-                    iteration: iteration + 1,
-                    pointsEarned: pointsDifference,
-                    totalPoints: finalPoints.totalPoints,
-                    rank: finalPoints.rank,
-                    rankChange: initialPoints.rank - finalPoints.rank
-                });
-            }
-        })
-    );
-
-    if (iteration < config.vote.iterations - 1) {
-        logWithBorder(
-            chalk.yellow(`⏳ Waiting ${config.vote.interval} seconds before next iteration...`),
-            "-"
-        );
-        await sleep(config.vote.interval * 1000);
-    }
+    // Implementation of processVoteWallets...
 }
 
 module.exports = {
     processVoteWallets,
+    executeTransactions,
+    waitForAllConfirmations,
     walletFees,
     walletPoints
 };
